@@ -5,6 +5,7 @@
  */
 #include "app_claw.h"
 #include "app_claw_hw_bridge.h"
+#include "cap_hanzi_writer.h"
 #include "app_capabilities.h"
 #include "app_settings_service.h"
 #include "display_service.h"
@@ -114,6 +115,17 @@ static esp_err_t main_register_ai_create_capability(
     (void)paths;
     return cap_im_ai_create_register_group();
 }
+
+#if CONFIG_HANZI_WRITER_ENABLE
+static esp_err_t main_register_hanzi_writer(
+    const app_claw_config_t *config,
+    const app_claw_storage_paths_t *paths)
+{
+    (void)config;
+    (void)paths;
+    return cap_hanzi_writer_register_group();
+}
+#endif
 
 static bool main_asr_config_changed(
     const app_config_t *before,
@@ -1145,6 +1157,15 @@ void app_main(void)
         }));
 #endif
     ESP_ERROR_CHECK(app_cap_system_platform_init(s_app_settings));
+#if CONFIG_HANZI_WRITER_ENABLE
+    ESP_ERROR_CHECK(app_capabilities_register_external_group(
+        &(app_capability_external_group_t) {
+            .group_id = "cap_hanzi_writer",
+            .display_name = "Hanzi Writer",
+            .llm_visible_by_default = true,
+            .reg = main_register_hanzi_writer,
+        }));
+#endif
     ESP_ERROR_CHECK(app_claw_set_save_config_callback(main_save_claw_config, NULL));
     ESP_ERROR_CHECK(app_claw_set_network_ready_callback(main_network_ready, NULL));
 #if CONFIG_APP_CLAW_MOSAIC_GSP_ENABLE

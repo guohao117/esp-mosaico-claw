@@ -17,7 +17,8 @@
 static const char *TAG = "display_lvgl";
 #define DISPLAY_SERVICE_DEFAULT_TICK_MS 5
 #define DISPLAY_SERVICE_DEFAULT_TASK_PERIOD_MS 10
-#define DISPLAY_SERVICE_TASK_STACK 8192
+/* LV_OS_NONE runs the ThorVG animation callbacks on the adapter task. */
+#define DISPLAY_SERVICE_TASK_STACK 32768
 #define DISPLAY_SERVICE_TASK_PRIO 5
 #define DISPLAY_SERVICE_HOME_INDICATOR_WIDTH 58
 #define DISPLAY_SERVICE_HOME_INDICATOR_HEIGHT 4
@@ -217,6 +218,9 @@ static void display_service_lvgl_present_teardown(
 static esp_err_t display_service_lvgl_create_home_indicator(
     struct display_service_session_t *session)
 {
+    if (session->flags & DISPLAY_SERVICE_SESSION_FLAG_HIDE_HOME_INDICATOR) {
+        return ESP_OK;
+    }
     ESP_RETURN_ON_ERROR(
         esp_lv_adapter_lock(1000), TAG, "lock LVGL shell creation");
 
@@ -305,6 +309,7 @@ static esp_err_t display_service_lvgl_present_activate(
     esp_lv_adapter_config_t adapter_config = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     adapter_config.task_priority = DISPLAY_SERVICE_TASK_PRIO;
     adapter_config.task_stack_size = DISPLAY_SERVICE_TASK_STACK;
+    adapter_config.stack_in_psram = true;
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
     adapter_config.task_core_id = 1;
 #else

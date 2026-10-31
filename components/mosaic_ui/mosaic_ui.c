@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "mosaico_camera_service.h"
 #include "mosaico_module_mgr.h"
@@ -94,6 +95,9 @@ static atomic_bool s_hub_foreground;
 static atomic_bool s_hub_presenter_active = true;
 static TaskHandle_t s_screen_task;
 static esp_timer_handle_t s_screen_idle_timer;
+/* Panel power changes and presenter handoffs share one ordering boundary.
+ * Take this before the loader lock, never from a loader event callback. */
+static SemaphoreHandle_t s_screen_power_lock;
 
 static void screen_post(uint32_t cmd, bool from_isr)
 {
@@ -136,16 +140,16 @@ static void screen_idle_timer_cb(void *arg)
     screen_post(SCREEN_CMD_SLEEP, false);
 }
 
-static void screen_apply_wake(void)
+static esp_err_t screen_apply_wake(void)
 {
     if (!atomic_load(&s_screen_asleep) && display_service_panel_enabled()) {
         screen_rearm_idle_timer();
-        return;
+        return ESP_OK;
     }
     const esp_err_t err = display_service_set_panel_enabled(true);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "screen wake Display On failed: %s", esp_err_to_name(err));
-        return;
+        return err;
     }
     /* CO5300 restarts TE after Display On. Resume GSP only after that. */
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -154,12 +158,13 @@ static void screen_apply_wake(void)
         ESP_LOGE(TAG, "screen wake GSP resume failed: %s",
                  esp_err_to_name(resume_err));
         (void)display_service_set_panel_enabled(false);
-        return;
+        return resume_err;
     }
     atomic_store(&s_ignore_wake_pointer, false);
     atomic_store(&s_screen_asleep, false);
     screen_rearm_idle_timer();
     ESP_LOGI(TAG, "screen wake: Display On complete");
+    return ESP_OK;
 }
 
 static void screen_apply_sleep(void)
@@ -236,12 +241,14 @@ static void screen_power_task(void *arg)
     for (;;) {
         (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         const uint32_t cmd = atomic_exchange(&s_screen_cmd, 0U);
+        xSemaphoreTake(s_screen_power_lock, portMAX_DELAY);
         /* Wake wins over a stale idle-timer SLEEP posted in the same batch. */
         if ((cmd & (SCREEN_CMD_WAKE | SCREEN_CMD_REARM)) != 0U) {
-            screen_apply_wake();
+            (void)screen_apply_wake();
         } else if ((cmd & SCREEN_CMD_SLEEP) != 0U) {
             screen_apply_sleep();
         }
+        xSemaphoreGive(s_screen_power_lock);
     }
 }
 
@@ -350,11 +357,20 @@ esp_err_t mosaic_ui_open_ai_create(void)
 static esp_err_t present_quiesce(void *ctx, uint32_t timeout_ms)
 {
     (void)ctx;
-    const esp_err_t err = mosaic_loader_quiesce(timeout_ms);
+    if (xSemaphoreTake(s_screen_power_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    /* Finish any sleep/wake before transferring the presenter. In particular,
+     * the new producer needs Display On and TE before its first frame. */
+    esp_err_t err = screen_apply_wake();
+    if (err == ESP_OK) {
+        err = mosaic_loader_quiesce(timeout_ms);
+    }
     if (err == ESP_OK) {
         atomic_store(&s_hub_presenter_active, false);
-        screen_post(SCREEN_CMD_REARM, false);
+        screen_rearm_idle_timer();
     }
+    xSemaphoreGive(s_screen_power_lock);
     return err;
 }
 
@@ -366,11 +382,16 @@ static esp_err_t present_activate(
             &s_present_producer, generation)) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (xSemaphoreTake(s_screen_power_lock,
+                       pdMS_TO_TICKS(SCREEN_PAUSE_TIMEOUT_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
     const esp_err_t err = mosaic_loader_activate(presenter, generation);
     if (err == ESP_OK) {
         atomic_store(&s_hub_presenter_active, true);
         screen_post(SCREEN_CMD_REARM, false);
     }
+    xSemaphoreGive(s_screen_power_lock);
     return err;
 }
 
@@ -440,6 +461,12 @@ esp_err_t mosaic_ui_start(void)
 
     ESP_RETURN_ON_ERROR(mosaic_ai_create_runtime_init(), TAG,
                         "init AI Create runtime failed");
+
+    if (s_screen_power_lock == NULL) {
+        s_screen_power_lock = xSemaphoreCreateMutex();
+        ESP_RETURN_ON_FALSE(s_screen_power_lock != NULL, ESP_ERR_NO_MEM,
+                            TAG, "create screen power lock");
+    }
 
     esp_display_presenter_t *presenter = NULL;
     esp_lcd_touch_handle_t touch = NULL;

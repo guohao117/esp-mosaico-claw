@@ -51,6 +51,7 @@ typedef enum {
 typedef enum {
     DISPLAY_SERVICE_SESSION_FLAG_RESTORE_DEFAULT_ON_RELEASE = 1 << 0,
     DISPLAY_SERVICE_SESSION_FLAG_ALLOW_SYSTEM_OVERLAY       = 1 << 1,
+    DISPLAY_SERVICE_SESSION_FLAG_HIDE_HOME_INDICATOR        = 1 << 2,
 } display_service_session_flags_t;
 
 typedef void (*display_service_session_cleanup_cb_t)(display_service_session_handle_t session, void *user_ctx);

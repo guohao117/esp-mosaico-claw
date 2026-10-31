@@ -6,6 +6,7 @@ idf_component_register(
         app_settings_service
         app_system_config
         audio_hub
+        cap_hanzi_writer
         claw_hw_registry
         claw_event_router
         cmd_wifi

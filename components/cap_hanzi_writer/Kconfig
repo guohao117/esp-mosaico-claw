@@ -1,0 +1,23 @@
+menu "Hanzi Writer"
+
+config HANZI_WRITER_ENABLE
+    bool "Enable the Hanzi Writer capability"
+    default y
+    depends on APP_CLAW_MOSAIC_GSP_ENABLE
+    select LV_USE_VECTOR_GRAPHIC
+    select LV_USE_SVG
+    select LV_USE_THORVG
+    help
+        Animate Chinese stroke order using LVGL and hanzi-writer-data.
+        Uses an exclusive display session and fetches one character from
+        the ByteDance npm CDN per request. No character corpus is bundled.
+
+config HANZI_WRITER_DATA_BASE_URL
+    string "Character JSON base URL"
+    depends on HANZI_WRITER_ENABLE
+    default "https://unpkg.byted-static.com/hanzi-writer-data/2.0.1"
+    help
+        HTTPS directory containing percent-encoded UTF-8 character.json files.
+        Omit the trailing slash. The default pins the upstream npm data version.
+
+endmenu
