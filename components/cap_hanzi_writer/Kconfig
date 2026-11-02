@@ -4,13 +4,11 @@ config HANZI_WRITER_ENABLE
     bool "Enable the Hanzi Writer capability"
     default y
     depends on APP_CLAW_MOSAIC_GSP_ENABLE
-    select LV_USE_VECTOR_GRAPHIC
-    select LV_USE_SVG
-    select LV_USE_THORVG
     help
         Animate Chinese stroke order using LVGL and hanzi-writer-data.
         Uses an exclusive display session and fetches one character from
         the ByteDance npm CDN per request. No character corpus is bundled.
+        Stroke paths are rasterized locally without LVGL SVG or ThorVG.
 
 config HANZI_WRITER_DATA_BASE_URL
     string "Character JSON base URL"

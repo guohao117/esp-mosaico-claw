@@ -19,7 +19,7 @@
 #include "hanzi_download.h"
 #include "hanzi_view.h"
 
-/* TLS and initial SVG rasterization execute synchronously on this task. */
+/* TLS and initial stroke rasterization execute synchronously on this task. */
 #define HANZI_WORKER_STACK 32768
 #define HANZI_WORKER_PRIORITY 3
 #define HANZI_COMMAND_QUEUE_DEPTH 4
@@ -36,9 +36,10 @@ typedef struct {
     uint32_t generation;
 } hanzi_command_t;
 
-/* The process-lifetime worker owns the session/screen. UI callbacks only enqueue
- * exits. The display service pauses LVGL before invoking session_cleanup(). */
+/* A worker exists only while requests or a view remain. The lifecycle mutex
+ * protects queue creation/enqueue/deletion, never display or LVGL operations. */
 typedef struct {
+    SemaphoreHandle_t lifecycle_lock;
     QueueHandle_t commands;
     display_service_session_handle_t session;
     lv_obj_t *screen;
@@ -52,7 +53,10 @@ static void request_exit(void *ctx)
 {
     hanzi_runtime_t *runtime = ctx;
     const hanzi_command_t command = {.generation = atomic_load(&runtime->generation)};
-    if (xQueueSend(runtime->commands, &command, 0) != pdTRUE) {
+    xSemaphoreTake(runtime->lifecycle_lock, portMAX_DELAY);
+    bool sent = !runtime->commands || xQueueSend(runtime->commands, &command, 0) == pdTRUE;
+    xSemaphoreGive(runtime->lifecycle_lock);
+    if (!sent) {
         ESP_LOGW(TAG, "Exit queue busy; try closing again");
     }
 }
@@ -174,19 +178,35 @@ static void worker(void *ctx)
                     ESP_LOGW(TAG, "Failed to close display: %s", esp_err_to_name(err));
                 }
             }
-            continue;
+        } else {
+            hanzi_request_t *request = command.request;
+            request->result = request->character[0] ? show_view(runtime, request) : stop_view(runtime);
+            xSemaphoreGive(request->done);
         }
-        hanzi_request_t *request = command.request;
-        request->result = request->character[0] ? show_view(runtime, request) : stop_view(runtime);
-        xSemaphoreGive(request->done);
+
+        xSemaphoreTake(runtime->lifecycle_lock, portMAX_DELAY);
+        bool idle = !runtime->session && uxQueueMessagesWaiting(runtime->commands) == 0;
+        if (idle) {
+            vQueueDelete(runtime->commands);
+            runtime->commands = NULL;
+        }
+        xSemaphoreGive(runtime->lifecycle_lock);
+        if (idle) {
+            vTaskDeleteWithCaps(NULL);
+            return;
+        }
     }
 }
 
 static esp_err_t runtime_init(void)
 {
-    if (s_runtime.commands) {
-        return ESP_OK;
-    }
+    s_runtime.lifecycle_lock = xSemaphoreCreateMutex();
+    return s_runtime.lifecycle_lock ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+/* Called with lifecycle_lock held. */
+static esp_err_t start_worker(void)
+{
     s_runtime.commands = xQueueCreate(HANZI_COMMAND_QUEUE_DEPTH, sizeof(hanzi_command_t));
     if (!s_runtime.commands) {
         return ESP_ERR_NO_MEM;
@@ -203,16 +223,25 @@ static esp_err_t runtime_init(void)
 
 static esp_err_t submit(hanzi_request_t *request)
 {
-    if (!s_runtime.commands) {
-        return ESP_ERR_INVALID_STATE;
-    }
     request->done = xSemaphoreCreateBinary();
     if (!request->done) {
         return ESP_ERR_NO_MEM;
     }
-    const hanzi_command_t command = {.request = request};
-    esp_err_t err = ESP_ERR_TIMEOUT;
-    if (xQueueSend(s_runtime.commands, &command, 0) == pdTRUE) {
+    esp_err_t err = ESP_OK;
+    bool queued = false;
+    xSemaphoreTake(s_runtime.lifecycle_lock, portMAX_DELAY);
+    if (!s_runtime.commands && request->character[0]) {
+        err = start_worker();
+    }
+    if (err == ESP_OK && s_runtime.commands) {
+        const hanzi_command_t command = {.request = request};
+        queued = xQueueSend(s_runtime.commands, &command, 0) == pdTRUE;
+        if (!queued) {
+            err = ESP_ERR_TIMEOUT;
+        }
+    }
+    xSemaphoreGive(s_runtime.lifecycle_lock);
+    if (queued) {
         /* The worker owns request until completion; all network I/O is bounded.
          * Keeping the caller alive also keeps this native tool's call lease. */
         xSemaphoreTake(request->done, portMAX_DELAY);

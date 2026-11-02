@@ -5,14 +5,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "esp_log.h"
-
 struct hanzi_view {
     lv_obj_t *root;
     lv_obj_t *canvas;
     lv_draw_buf_t *buffer;
     hw_character_t *character;
-    hw_svg_renderer_t *renderer;
+    hw_renderer_t *renderer;
     hw_player_t player;
     lv_timer_t *timer;
     uint32_t last_tick;
@@ -20,15 +18,12 @@ struct hanzi_view {
     void *exit_ctx;
 };
 
-static bool refresh(hanzi_view_t *view)
+static void refresh(hanzi_view_t *view)
 {
-    if (!hw_svg_renderer_draw(view->renderer, view->player.completed,
-                              view->player.progress, true, view->buffer)) {
-        return false;
-    }
+    hw_renderer_draw(view->renderer, view->player.completed,
+                      view->player.progress, true, view->buffer);
     lv_draw_buf_flush_cache(view->buffer, NULL);
     lv_obj_invalidate(view->canvas);
-    return true;
 }
 
 static void clicked(lv_event_t *event)
@@ -45,12 +40,16 @@ static void tick(lv_timer_t *timer)
     uint32_t now = lv_tick_get();
     hw_player_update(&view->player, now - view->last_tick);
     view->last_tick = now;
-    if (!refresh(view)) {
-        ESP_LOGE("hanzi_view", "Out of memory drawing stroke");
-        lv_timer_pause(timer);
-        view->on_exit(view->exit_ctx);
-    } else if (view->player.state == HW_FINISHED) {
-        lv_timer_pause(timer);
+    refresh(view);
+    if (view->player.state == HW_FINISHED) {
+        lv_timer_delete(timer);
+        view->timer = NULL;
+        /* The final canvas is self-contained; replay controls do not exist. */
+        hw_renderer_destroy(view->renderer);
+        view->renderer = NULL;
+        hw_character_destroy(view->character);
+        view->character = NULL;
+        view->player.character = NULL;
     }
 }
 
@@ -59,7 +58,7 @@ static void free_view(hanzi_view_t *view)
     if (view->timer) {
         lv_timer_delete(view->timer);
     }
-    hw_svg_renderer_destroy(view->renderer);
+    hw_renderer_destroy(view->renderer);
     if (view->canvas) {
         lv_obj_delete(view->canvas);
     }
@@ -129,18 +128,15 @@ hanzi_view_t *hanzi_view_create(lv_obj_t *parent, const char *json,
     lv_canvas_set_draw_buf(view->canvas, view->buffer);
     lv_obj_center(view->canvas);
     lv_obj_remove_flag(view->canvas, LV_OBJ_FLAG_CLICKABLE);
-    failure = "Out of memory creating SVG renderer";
-    view->renderer = hw_svg_renderer_create(view->root, view->character, size, error, error_size);
+    failure = "Out of memory creating Hanzi renderer";
+    view->renderer = hw_renderer_create(view->character, size, error, error_size);
     if (!view->renderer) {
         goto bad;
     }
     hw_player_init(&view->player, view->character);
     view->player.speed = 1.5f;
     hw_player_restart(&view->player, true);
-    failure = "Could not render Hanzi canvas";
-    if (!refresh(view)) {
-        goto bad;
-    }
+    refresh(view);
     view->last_tick = lv_tick_get();
     failure = "Out of memory creating Hanzi animation timer";
     view->timer = lv_timer_create(tick, 33, view);

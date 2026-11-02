@@ -13,10 +13,10 @@ is visible to the LLM by default (`llm_visible_by_default = true`) so it can be
 invoked in a single tool-call turn without a separate Skill activation round-trip.
 No changes to the ESP-Claw submodule are required.
 
-`CONFIG_HANZI_WRITER_ENABLE` defaults on with Mosaic UI and selects LVGL vector,
-SVG and ThorVG support. It uses the product's existing LVGL 9.5 and display
-service; it neither initializes another LVGL runtime nor accesses the panel
-directly. No dependency on the sibling desktop project remains in the build.
+`CONFIG_HANZI_WRITER_ENABLE` defaults on with Mosaic UI. It uses the product's
+existing LVGL 9.5 Canvas and display service, without enabling LVGL vector, SVG
+or ThorVG support. It neither initializes another LVGL runtime nor accesses the
+panel directly. No dependency on the sibling desktop project remains in the build.
 
 ## Tools and behavior
 
@@ -29,7 +29,8 @@ directly. No dependency on the sibling desktop project remains in the build.
 The round-screen view contains only the centered animation, with no title,
 status text, buttons or home indicator. Its canvas occupies 70% of the screen
 diameter (336 pixels on a 480-pixel display). When playback finishes the timer
-pauses; tapping anywhere then closes the view. Taps during playback are ignored.
+and rendering resources are freed; tapping anywhere then closes the view.
+Taps during playback are ignored.
 The existing bottom swipe exit gesture and physical Back action remain available.
 Replacing a Hanzi view is supported;
 an exclusive display session belonging to another component is reported as busy.
@@ -54,33 +55,63 @@ Documents remain limited to 128 KiB;
 each HTTP operation has a 15-second timeout and the read loop has a 30-second
 overall deadline. Unsupported glyphs return a missing-data error.
 
-One process-lifetime worker owns all network/display operations. Tool callers
-submit bounded queue commands and wait for initialization or stop completion;
-the worker remains allocated while the capability is disabled, and group stop
-closes its current display session. LVGL owns animation/touch callbacks under
+Registration creates only a lifecycle mutex. The first show request creates a
+worker and command queue; they exist while requests or a Hanzi view remain.
+After closing the view (or a failed show), the worker drains accepted commands,
+deletes the queue and exits with `vTaskDeleteWithCaps`, releasing its PSRAM stack.
+Stopping an idle tool does not start a worker. Tool callers wait for show/stop
+completion; group stop uses the same close path.
+
+The lifecycle mutex protects queue creation, enqueue and deletion. It is never
+held across display or LVGL operations. LVGL owns animation/touch callbacks under
 the existing adapter lock. Close callbacks enqueue a generation-tagged request
 instead of closing from inside LVGL. Cleanup runs after the display service
-pauses LVGL and releases this view's timer, objects, stroke masks and buffers.
-Canvas objects are deleted before their backing draw buffers. Both the Hanzi
-worker and LVGL adapter use 32 KiB PSRAM stacks for synchronous ThorVG rendering.
-The worker uses `xTaskCreateWithCaps`; the adapter uses its existing PSRAM-stack
-option. Download logs print the
+pauses LVGL. Canvas objects are deleted before their backing draw buffers.
+The worker uses a 32 KiB PSRAM stack for TLS and initial path rasterization.
+Its LVGL session uses the service's 8 KiB PSRAM stack, since animation frames
+no longer invoke ThorVG. The worker uses `xTaskCreateWithCaps`; the adapter uses
+its existing PSRAM-stack option.
+Download logs print the
 actual URL, and tool errors distinguish downloading from opening or loading the
 LVGL display session. Mosaic's screen-power lock serializes sleep/wake with presenter
 handoffs and wakes the panel before an exclusive producer starts.
 
+The renderer reads the data package's absolute `M/L/Q/C/Z` paths directly;
+it does not construct or parse SVG XML documents. Quadratic and cubic curves
+are flattened to within 0.2 display pixels. A nonzero-winding scanline fill
+uses four vertical samples with horizontal pixel coverage to prepare each
+cropped A8 stroke mask. The original coordinate transform, contours and
+median paths are retained.
+
+The round-capped brush is the union of capsules along the median, including
+the existing 100-unit extensions at each end. It writes antialiased coverage
+into one A8 scratch buffer sized to the largest stroke mask. There is no
+full-canvas ARGB scratch image, hidden scratch Canvas or per-frame allocation.
+The new rasterizer can produce slightly different edge coverage than ThorVG;
+the visual result requires manual acceptance.
+
 The renderer caches the grid, guide and completed strokes in one RGB565 buffer,
 rebuilding it only when a stroke completes or guide visibility changes. Each
 animation frame copies that base and composites the active stroke. On the
-336-pixel canvas this buffer costs about 221 KiB and is released with the view;
-SVG masks and the median-driven brush remain unchanged.
+336-pixel canvas this buffer costs about 221 KiB. Once playback finishes, the
+renderer, stroke masks, brush data and parsed character are freed. This releases
+the 221 KiB base buffer and variable-sized A8 brush buffer plus the per-character data, retaining
+only the finished canvas and display session until the user closes it.
+The original stroke contours and median-driven reveal are preserved.
+
+The firmware enables PSRAM XIP, so linked code and read-only data also consume
+PSRAM at boot. The lifecycle changes above release dynamic resources; they do
+not unload statically linked code or change global XIP settings. Removing this
+component's vector/SVG/ThorVG dependency reduces its boot-time XIP footprint;
+the rest of LVGL remains available to existing applications.
 
 ## Source and data attribution
 
-The portable parser/player and SVG mask renderer were ported from the user's
-`hanzi-writer` desktop prototype (`src/hanzi` and `src/app/hanzi_render.*`).
-The device view retains its median-driven brush clipped to exact SVG stroke
-masks, rather than approximating the character using a font or centerlines.
+The portable data parser/player and contour-mask/median-brush approach were
+ported from the user's `hanzi-writer` desktop prototype (`src/hanzi` and
+`src/app/hanzi_render.*`). The device's path rasterizer and capsule brush avoid
+the prototype's SVG/ThorVG backend. Characters still use the original stroke
+outlines, rather than a font or a centerline-only approximation.
 
 Character data comes from [hanzi-writer-data](https://github.com/chanind/hanzi-writer-data),
 derived from Make Me a Hanzi. Its separate Arphic Public License is preserved
