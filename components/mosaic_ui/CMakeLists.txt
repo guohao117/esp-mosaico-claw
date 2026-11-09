@@ -47,6 +47,7 @@ idf_component_register(
                  "${CMAKE_CURRENT_BINARY_DIR}/generated"
     REQUIRES
         esp_timer
+        font_service
         freertos
         pthread
         cjson

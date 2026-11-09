@@ -16,6 +16,7 @@
 #include "esp_heap_caps.h"
 #include "esp_mmap_assets.h"
 #include "esp_timer.h"
+#include "font_service.h"
 #include "gsp/gsp_font_catalog.h"
 #include "mosaic_app_shell.h"
 #include "mosaic_logic.h"
@@ -51,7 +52,8 @@ struct mosaic_esp_platform_t {
     mosaic_esp_platform_config_t config;
     mmap_assets_handle_t assets;
     gsp_font_catalog_t* font_catalog;
-    uint8_t* dynamic_font_data;
+    font_service_handle_t dynamic_font_blob;
+    const uint8_t* dynamic_font_data;
     size_t dynamic_font_size;
     mosaic_esp_app_t* active;
     esp_gsp_handle_t hub_ui;
@@ -78,40 +80,17 @@ static esp_err_t load_dynamic_font(mosaic_esp_platform_handle_t platform)
             sizeof(path)),
         "mosaic_platform", "resolve dynamic font path");
 
-    FILE* file = fopen(path, "rb");
-    if (file == NULL) {
-        printf("mosaic_platform: open dynamic font %s failed\n", path);
-        return ESP_ERR_NOT_FOUND;
-    }
-    if (fseek(file, 0, SEEK_END) != 0) {
-        fclose(file);
-        return ESP_FAIL;
-    }
-    const long raw_size = ftell(file);
-    if (raw_size <= 0 || fseek(file, 0, SEEK_SET) != 0) {
-        fclose(file);
-        return ESP_ERR_INVALID_SIZE;
+    font_service_view_t view = {0};
+    esp_err_t err = font_service_acquire_file(
+        path, &platform->dynamic_font_blob, &view);
+    if (err != ESP_OK) {
+        printf("mosaic_platform: acquire dynamic font %s failed: %s\n",
+            path, esp_err_to_name(err));
+        return err;
     }
 
-    uint8_t* data = heap_caps_malloc(
-        (size_t)raw_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (data == NULL) {
-        fclose(file);
-        printf("mosaic_platform: allocate dynamic font %ld bytes failed\n",
-            raw_size);
-        return ESP_ERR_NO_MEM;
-    }
-    const size_t read_size = fread(data, 1, (size_t)raw_size, file);
-    fclose(file);
-    if (read_size != (size_t)raw_size) {
-        free(data);
-        printf("mosaic_platform: read dynamic font failed: %u/%ld bytes\n",
-            (unsigned)read_size, raw_size);
-        return ESP_FAIL;
-    }
-
-    platform->dynamic_font_data = data;
-    platform->dynamic_font_size = (size_t)raw_size;
+    platform->dynamic_font_data = view.data;
+    platform->dynamic_font_size = view.size;
     printf("mosaic_platform: loaded dynamic font %s (%u bytes)\n",
         path, (unsigned)platform->dynamic_font_size);
     return ESP_OK;
@@ -787,7 +766,10 @@ void mosaic_esp_platform_delete(mosaic_esp_platform_handle_t platform)
     if (platform->assets != NULL) {
         mmap_assets_del(platform->assets);
     }
-    free(platform->dynamic_font_data);
+    font_service_release(platform->dynamic_font_blob);
+    platform->dynamic_font_blob = NULL;
+    platform->dynamic_font_data = NULL;
+    platform->dynamic_font_size = 0;
     free(platform);
 }
 
